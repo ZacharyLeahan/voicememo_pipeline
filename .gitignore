@@ -9,5 +9,6 @@ samples/
 data/
 voice-memos/
 transcripts/
+transcripts-medium/
 transcripts-openai/
 backfill_manifest.py

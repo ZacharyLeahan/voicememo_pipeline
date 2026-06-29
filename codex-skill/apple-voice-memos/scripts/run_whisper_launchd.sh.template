@@ -1,0 +1,10 @@
+#!/bin/zsh
+set -eu
+
+export HOME="${HOME:-__HOME__}"
+export PATH=/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin
+
+PYTHON="__PYTHON__"
+SCRIPT="__SKILL_DIR__/scripts/transcribe_missing_whisper.py"
+
+exec "$PYTHON" "$SCRIPT" --model medium --language en --settle-seconds 20 "$@"
