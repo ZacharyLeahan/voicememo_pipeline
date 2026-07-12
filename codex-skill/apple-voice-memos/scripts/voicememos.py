@@ -22,11 +22,11 @@ import argparse
 import datetime as _dt
 import json
 import os
+import re
 import shutil
 import sqlite3
 import sys
 import tempfile
-import re
 from pathlib import Path
 
 # Core Data / NSDate epoch is 2001-01-01 UTC; add this to get a Unix timestamp.
@@ -50,8 +50,8 @@ _FDA_HINT = (
     "Voice Memos is a macOS privacy-protected location. The running process "
     "needs Full Disk Access. Grant it to the gateway's Python:\n"
     "  System Settings > Privacy & Security > Full Disk Access > +\n"
-    "  add the app/binary that runs this skill (e.g. Claude, or your python3),\n"
-    "  then restart it.  (Cmd+Shift+G in the picker lets you paste a path.)"
+    "  add  ~/.hermes/hermes-agent/venv/bin/python  (Cmd+Shift+G to paste the path)\n"
+    "then: hermes gateway restart"
 )
 
 
@@ -110,9 +110,8 @@ def whisper_transcript_path(rec: dict) -> Path:
 
 def read_whisper_transcript(rec: dict) -> str | None:
     """Read a cached local Whisper transcript, if the cron worker made one."""
-    path = whisper_transcript_path(rec)
     try:
-        text = path.read_text(encoding="utf-8").strip()
+        text = whisper_transcript_path(rec).read_text(encoding="utf-8").strip()
     except OSError:
         return None
     return text or None
@@ -143,7 +142,7 @@ def load_recordings() -> list[dict]:
             raise VoiceMemosAccessError(
                 f"Voice Memos database not found at {DB_PATH}\n{_FDA_HINT}"
             )
-        tmpdir = tempfile.mkdtemp(prefix="voicememos_")
+        tmpdir = tempfile.mkdtemp(prefix="hermes_vm_")
         local_db = os.path.join(tmpdir, "CloudRecordings.db")
         # Copy the main db plus WAL/SHM so recently-recorded rows aren't missed.
         for suffix in ("", "-wal", "-shm"):
@@ -259,75 +258,89 @@ def cmd_transcript(args) -> None:
     if args.json:
         print(json.dumps({**rec, "transcript": text, "transcript_source": source}, indent=2))
         return
-    print(f"# {rec['title']}")
-    print(f"{rec['date_human']}  ({_fmt_dur(rec['duration_sec'])})  {rec['filename']}\n")
+    print(
+        f"# {rec['title']}\n"
+        f"date: {rec['date_human']}\n"
+        f"duration: {_fmt_dur(rec['duration_sec'])}\n"
+        f"source: {source or 'none'}\n"
+    )
     if text:
-        if source == "whisper-medium":
-            print("(local Whisper medium transcript)\n")
         print(text)
     else:
-        print("(no Apple or cached Whisper transcript)")
+        print("(No transcript found — neither Apple nor local Whisper cache)")
 
 
 def cmd_dump(args) -> None:
     recs = load_recordings()
     if args.search:
         recs = [r for r in recs if _match(r, args.search)]
-    recs = [r for r in recs if r["exists"]]
+    if args.only_transcribed:
+        recs = [r for r in recs if r["exists"] and best_transcript(r)[0]]
     if args.limit:
         recs = recs[: args.limit]
 
     results = []
     for r in recs:
-        text, source = best_transcript(r)
-        if args.only_transcribed and not text:
-            continue
-        results.append({**r, "transcript": text, "transcript_source": source})
+        text, source = best_transcript(r) if r["exists"] else (None, None)
+        results.append(
+            {
+                **r,
+                "transcript": text,
+                "transcript_source": source,
+                "whisper_transcript_path": str(whisper_transcript_path(r)),
+            }
+        )
 
     if args.json:
         print(json.dumps(results, indent=2))
         return
+    if not results:
+        print("No matching recordings.")
+        return
     for r in results:
         source = f" [{r['transcript_source']}]" if r.get("transcript_source") else ""
-        print(f"## {r['title']}  --  {r['date_human']}  ({_fmt_dur(r['duration_sec'])}){source}")
+        print(f"## {r['title']}  —  {r['date_human']}  ({_fmt_dur(r['duration_sec'])}){source}")
         print(r["transcript"] or "(no transcript)")
         print()
 
 
-def main(argv: list[str] | None = None) -> None:
-    p = argparse.ArgumentParser(description="Read Apple Voice Memos transcripts.")
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(description="Read Apple Voice Memos transcripts")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    pl = sub.add_parser("list", help="list recordings (newest first)")
-    pl.add_argument("--limit", type=int, default=30)
-    pl.add_argument("--search", help="filter by title/filename")
-    pl.add_argument(
-        "--with-transcript",
-        action="store_true",
-        help="only show recordings that have a transcript",
-    )
-    pl.add_argument("--json", action="store_true")
-    pl.set_defaults(func=cmd_list)
+    s = sub.add_parser("list", help="List recordings")
+    s.add_argument("--limit", type=int, default=30)
+    s.add_argument("--search", help="Filter by title/filename/unique id substring")
+    s.add_argument("--with-transcript", action="store_true")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_list)
 
-    pt = sub.add_parser("transcript", help="print one transcript")
-    pt.add_argument("selector", help="list index, filename, unique id, or title search")
-    pt.add_argument("--json", action="store_true")
-    pt.set_defaults(func=cmd_transcript)
+    s = sub.add_parser("transcript", help="Print one transcript")
+    s.add_argument("selector", help="index from list, filename, title substring, or unique id")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_transcript)
 
-    pd = sub.add_parser("dump", help="print many transcripts at once")
-    pd.add_argument("--limit", type=int, default=10)
-    pd.add_argument("--search", help="filter by title/filename")
-    pd.add_argument(
-        "--only-transcribed",
-        action="store_true",
-        help="skip recordings without a transcript",
-    )
-    pd.add_argument("--json", action="store_true")
-    pd.set_defaults(func=cmd_dump)
+    s = sub.add_parser("dump", help="Dump many transcripts")
+    s.add_argument("--limit", type=int, default=20)
+    s.add_argument("--search")
+    s.add_argument("--only-transcribed", action="store_true")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_dump)
 
-    args = p.parse_args(argv)
-    args.func(args)
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        args.func(args)
+        return 0
+    except VoiceMemosAccessError as e:
+        _die(str(e))
+    except BrokenPipeError:
+        return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

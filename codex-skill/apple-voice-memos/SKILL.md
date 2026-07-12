@@ -1,6 +1,16 @@
 ---
 name: apple-voice-memos
-description: Read and search transcripts of the user's Apple Voice Memos on macOS. Lists recordings and extracts Apple's on-device transcripts straight from each .m4a file, falling back to cached local Whisper medium transcripts when Apple has none. Use when the user asks what a voice memo said, to summarize or search their voice memos, or to turn recent memos into notes, tasks, or summaries ("what did I record yesterday?", "read my last voice memo", "find the memo about X").
+description: "Read Apple Voice Memos transcripts on macOS, preferring Apple's embedded transcript and falling back to cached local Whisper medium transcripts."
+version: 1.1.0
+author: Hermes Agent
+license: MIT
+platforms: [macos]
+metadata:
+  hermes:
+    tags: [VoiceMemos, Apple, macOS, transcription, note-taking]
+    related_skills: [apple-notes]
+prerequisites:
+  commands: [python3]
 ---
 
 # Apple Voice Memos
@@ -8,9 +18,8 @@ description: Read and search transcripts of the user's Apple Voice Memos on macO
 Read and search transcripts of the user's Apple Voice Memos. On macOS 15+/iOS 18+
 Voice Memos transcribes recordings on-device and embeds the transcript text
 directly inside each `.m4a` file (a QuickTime `tsrp` atom). This skill reads that
-text straight out of the file first. If Apple has no embedded transcript, it can
-fall back to cached local Whisper medium transcripts written by the non-LLM
-worker in `scripts/transcribe_missing_whisper.py`.
+text first, then falls back to a transcript cached by the local Whisper worker
+when Apple has not embedded one.
 
 Recording metadata (title, date, duration) comes from the Voice Memos database,
 opened read-only.
@@ -23,18 +32,10 @@ opened read-only.
 
 ## When NOT to Use
 
-- Transcribing arbitrary audio files (not Voice Memos) → use a transcription tool
-- Recording new audio
+- Transcribing arbitrary audio files (not Voice Memos) → use the transcription tool
+- Recording new audio → that's the built-in `/voice` mode
 - Memos with no embedded transcript (very old, very short, or not yet processed) —
   these show `[ ]` in `list`; the script reports when a transcript is missing
-
-## Requirements
-
-- **macOS only**, with Python 3 (`python3`) available.
-- The process that runs this skill needs macOS **Full Disk Access** to read the
-  privacy-protected Voice Memos container. Grant it under
-  System Settings → Privacy & Security → Full Disk Access. The script's error
-  messages say this when access is missing.
 
 ## Quick Reference
 
@@ -74,42 +75,21 @@ python3 scripts/voicememos.py dump --search "meeting" --json
   (`ZCLOUDRECORDING` table → title, date, duration, filename).
 - **Transcript:** the `.m4a` contains a `tsrp` user-data atom holding JSON
   (`attributedString.runs`); the string elements concatenated are the transcript.
-- **Whisper fallback:** when no Apple transcript exists, the local cron worker
-  writes text files to `~/.voicememo-whisper/transcripts/<unique_id>.txt` and the
-  skill reads them as fallback only.
+- **Whisper fallback:** if Apple has no embedded transcript, the skill reads
+  `~/.voicememo-whisper/transcripts/<unique_id>.txt` when available.
 - Dates are stored in Cocoa epoch (2001-01-01) and converted to local time.
-
-## Local Whisper Fallback
-
-The fallback job is intentionally not an LLM automation. It runs local
-`faster-whisper` with the medium model via `scripts/transcribe_missing_whisper.py`.
-For event-driven use on macOS, install a user LaunchAgent with `WatchPaths`
-pointing at:
-
-```bash
-~/Library/Group Containers/group.com.apple.VoiceMemos.shared/Recordings
-```
-
-It scans Voice Memos read-only, skips recordings that already have Apple's
-embedded transcript, skips recordings already cached in `~/.voicememo-whisper`,
-and stores the transcript plus a small JSON sidecar. It uses a lock file so a
-slow run will not overlap another trigger.
 
 ## Rules
 
-1. Prefer reading the embedded Apple transcript. The Whisper fallback is used
-   only when Apple has no transcript.
+1. Prefer Apple's embedded transcript; use cached local Whisper text only as a fallback.
 2. The database is opened **read-only**; never write to Voice Memos files or DB.
-3. When a requested memo has no Apple or cached Whisper transcript, say so
-   plainly rather than guessing.
+3. When a requested memo has no Apple or cached Whisper transcript, say so plainly.
+4. To save a memo's transcript somewhere durable, combine with the `apple-notes`
+   skill or the `memory` tool.
 
 ## Limitations
 
 - macOS only. Requires Voice Memos to have transcribed the recording on-device
-  (governed by Apple; supported languages only). Apple only writes the transcript
-  after **Transcribe** is tapped in the Voice Memos app — recording alone does not
-  populate it.
+  (governed by Apple; English and other supported languages only).
 - Memos still syncing from iCloud may not have their `.m4a` downloaded locally yet
   (`exists: false` in `--json`).
-</content>
-</invoke>
